@@ -27,6 +27,9 @@ impl ChronoPayContract {
     /// Create a time slot with an auto-incrementing slot id.
     /// Returns the newly assigned slot id.
     pub fn create_time_slot(env: Env, professional: String, start_time: u64, end_time: u64) -> u32 {
+        if end_time <= start_time {
+            panic!("end_time must be greater than start_time");
+        }
         let _ = (professional, start_time, end_time);
 
         let current_seq: u32 = env

@@ -48,6 +48,36 @@ fn test_create_time_slot_auto_increments() {
 }
 
 #[test]
+#[should_panic(expected = "end_time must be greater than start_time")]
+fn test_create_time_slot_invalid_time_range() {
+    let env = Env::default();
+    let contract_id = env.register(ChronoPayContract, ());
+    let client = ChronoPayContractClient::new(&env, &contract_id);
+
+    // end_time < start_time should panic
+    client.create_time_slot(
+        &String::from_str(&env, "professional_alice"),
+        &2000u64,
+        &1000u64,
+    );
+}
+
+#[test]
+#[should_panic(expected = "end_time must be greater than start_time")]
+fn test_create_time_slot_zero_duration() {
+    let env = Env::default();
+    let contract_id = env.register(ChronoPayContract, ());
+    let client = ChronoPayContractClient::new(&env, &contract_id);
+
+    // end_time == start_time should panic
+    client.create_time_slot(
+        &String::from_str(&env, "professional_alice"),
+        &1000u64,
+        &1000u64,
+    );
+}
+
+#[test]
 fn test_mint_and_redeem() {
     let env = Env::default();
     let contract_id = env.register(ChronoPayContract, ());
