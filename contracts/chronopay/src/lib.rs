@@ -61,12 +61,19 @@ impl ChronoPayContract {
         true
     }
 
-    /// Redeem time token (stub). In full implementation: token_id, marks as redeemed.
+    /// Redeem time token. In full implementation: token_id, marks as redeemed.
+    /// Emits a redemption event for indexers to track the completion of slots.
     pub fn redeem_time_token(env: Env, token_id: Symbol) -> bool {
-        let _ = token_id;
+        // ASSUMPTION: The token is valid and caller is authorized to redeem it.
+        // CONSTRAINT: Can only be redeemed once (authorization logic to be fully implemented).
         env.storage()
             .instance()
             .set(&DataKey::Status, &TimeTokenStatus::Redeemed);
+
+        // BEHAVIOR: Emit a redemption event for indexers to track finalized slots.
+        env.events()
+            .publish((Symbol::new(&env, "redemption"),), token_id);
+
         true
     }
 

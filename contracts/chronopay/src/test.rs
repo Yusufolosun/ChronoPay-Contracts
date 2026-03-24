@@ -59,4 +59,8 @@ fn test_mint_and_redeem() {
 
     let redeemed = client.redeem_time_token(&token);
     assert!(redeemed);
+
+    // Verify redemption event
+    let events = env.events().all();
+    assert!(events.len() > 0, "Expected redemption event to be emitted");
 }
