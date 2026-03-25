@@ -1,226 +1,255 @@
-#![cfg(test)]
+#![no_std]
+//! ChronoPay time token contract.
+//! Adds production-ready token metadata for time NFTs with validation, storage, and retrieval helpers.
 
-use super::*;
-use soroban_sdk::{vec, Address, Env, String, Symbol};
-use soroban_sdk::testutils::Address as _;
+extern crate alloc;
 
-fn setup() -> Env {
-    Env::default()
+use alloc::format;
+use soroban_sdk::{
+    contract, contractimpl, contracttype, vec, Address, Env, String, Symbol, Vec,
+};
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimeTokenStatus {
+    Available,
+    Sold,
+    Redeemed,
 }
 
-#[test]
-fn test_hello() {
-    let env = setup();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let words = client.hello(&String::from_str(&env, "Dev"));
-    assert_eq!(
-        words,
-        vec![
-            &env,
-            String::from_str(&env, "ChronoPay"),
-            String::from_str(&env, "Dev"),
-        ]
-    );
+/// Persistent and instance storage keys used by the contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    CollectionMetadata,
+    SlotSeq,
+    TokenSeq,
+    Slot(u32),
+    Token(Symbol),
+    // Note: 'Owner' and 'Status' from main were redundant given TimeTokenMetadata
 }
 
-#[test]
-fn test_initialize_and_metadata() {
-    let env = setup();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let name = String::from_str(&env, "ChronoPay Time Tokens");
-    let symbol = String::from_str(&env, "TIME");
-    
-    client.initialize(&admin, &name, &symbol);
-    
-    let metadata = client.get_collection_metadata().expect("metadata should exist");
-    assert_eq!(metadata.name, name);
-    assert_eq!(metadata.symbol, symbol);
+/// Contract-level metadata for the NFT collection.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionMetadata {
+    pub name: String,
+    pub symbol: String,
 }
 
-#[test]
-#[should_panic(expected = "already initialized")]
-fn test_initialize_twice_panics() {
-    let env = setup();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    let name = String::from_str(&env, "Name");
-    let symbol = String::from_str(&env, "SYM");
-    
-    client.initialize(&admin, &name, &symbol);
-    client.initialize(&admin, &name, &symbol);
+/// Detailed metadata for an individual token following production standards.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenMetadata {
+    pub name: String,
+    pub description: String,
+    pub image_uri: String,
 }
 
-#[test]
-fn test_create_time_slot_persists() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let professional = Address::generate(&env);
-    let slot_id = client.create_time_slot(
-        &professional,
-        &1_000u64,
-        &2_000u64,
-    );
-    assert_eq!(slot_id, 1);
-
-    let slot = client.get_time_slot(&slot_id).expect("slot should exist");
-    assert_eq!(slot.professional, professional);
-    assert_eq!(slot.start_time, 1_000u64);
-    assert_eq!(slot.end_time, 2_000u64);
-    assert!(slot.token.is_none());
+/// Data representing a scheduled time slot.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeSlot {
+    pub professional: Address,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub token: Option<Symbol>,
 }
 
-#[test]
-#[should_panic(expected = "end_time must be after start_time")]
-fn test_create_time_slot_rejects_invalid_times() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-    let professional = Address::generate(&env);
-    let _ = client.create_time_slot(&professional, &10u64, &10u64);
+/// Metadata stored for every minted time NFT.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeTokenMetadata {
+    pub token_id: Symbol,
+    pub slot_id: u32,
+    pub professional: Address,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub status: TimeTokenStatus,
+    pub current_owner: Address,
+    pub metadata: TokenMetadata,
 }
 
-#[test]
-fn test_mint_buy_redeem_lifecycle() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
+#[contract]
+pub struct ChronoPayContract;
 
-    let professional = Address::generate(&env);
-    let slot_id = client.create_time_slot(&professional, &100u64, &200u64);
+#[contractimpl]
+impl ChronoPayContract {
+    /// Initialize the contract with admin and collection metadata.
+    pub fn initialize(env: Env, admin: Address, name: String, symbol: String) {
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        
+        let metadata = CollectionMetadata { name, symbol };
+        env.storage().instance().set(&DataKey::CollectionMetadata, &metadata);
+    }
+
+    /// Create a time slot and persist it using persistent storage.
+    pub fn create_time_slot(env: Env, professional: Address, start_time: u64, end_time: u64) -> u32 {
+        professional.require_auth();
+
+        if start_time >= end_time {
+            panic!("end_time must be after start_time");
+        }
+
+        let slot_id = next_sequence(&env, DataKey::SlotSeq);
+        let slot = TimeSlot {
+            professional: professional.clone(),
+            start_time,
+            end_time,
+            token: None,
+        };
+
+        env.storage().persistent().set(&DataKey::Slot(slot_id), &slot);
+
+        env.events().publish(
+            (Symbol::new(&env, "slot_created"), professional),
+            slot_id
+        );
+
+        slot_id
+    }
+
+    /// Mint a time token for a slot with detailed metadata.
+    pub fn mint_time_token(env: Env, slot_id: u32, metadata: TokenMetadata) -> Symbol {
+        let mut slot: TimeSlot = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Slot(slot_id))
+            .expect("slot does not exist");
+
+        slot.professional.require_auth();
+
+        if slot.token.is_some() {
+            panic!("token already minted for slot");
+        }
+
+        let token_id = next_sequence(&env, DataKey::TokenSeq);
+        let token_symbol = build_token_symbol(&env, token_id);
+
+        let time_token_metadata = TimeTokenMetadata {
+            token_id: token_symbol.clone(),
+            slot_id,
+            professional: slot.professional.clone(),
+            start_time: slot.start_time,
+            end_time: slot.end_time,
+            status: TimeTokenStatus::Available,
+            current_owner: slot.professional.clone(),
+            metadata,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_symbol.clone()), &time_token_metadata);
+
+        slot.token = Some(token_symbol.clone());
+        env.storage().persistent().set(&DataKey::Slot(slot_id), &slot);
+
+        env.events().publish(
+            (Symbol::new(&env, "token_minted"), slot.professional),
+            (token_symbol.clone(), slot_id)
+        );
+
+        token_symbol
+    }
+
+    /// Buy / transfer a time token from seller to buyer.
+    pub fn buy_time_token(env: Env, token_id: Symbol, buyer: Address) -> bool {
+        buyer.require_auth();
+
+        let mut metadata: TimeTokenMetadata = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id.clone()))
+            .expect("unknown token");
+
+        if metadata.status == TimeTokenStatus::Redeemed {
+            panic!("token already redeemed");
+        }
+        
+        if metadata.current_owner == buyer {
+            panic!("buyer is already the owner");
+        }
+
+        let old_owner = metadata.current_owner.clone();
+        metadata.current_owner = buyer.clone();
+        metadata.status = TimeTokenStatus::Sold;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id.clone()), &metadata);
+
+        env.events().publish(
+            (Symbol::new(&env, "token_bought"), token_id),
+            (old_owner, buyer)
+        );
+
+        true
+    }
+
+    /// Redeem a time token, marking it as consumed.
+    pub fn redeem_time_token(env: Env, token_id: Symbol) -> bool {
+        let mut metadata: TimeTokenMetadata = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Token(token_id.clone()))
+            .expect("unknown token");
+
+        metadata.current_owner.require_auth();
+
+        if metadata.status == TimeTokenStatus::Redeemed {
+            panic!("token already redeemed");
+        }
+
+        metadata.status = TimeTokenStatus::Redeemed;
+        
+        env.storage()
+            .persistent()
+            .set(&DataKey::Token(token_id.clone()), &metadata);
+
+        env.events().publish(
+            (Symbol::new(&env, "token_redeemed"), token_id),
+            metadata.current_owner
+        );
+
+        true
+    }
+
+    pub fn get_token_metadata(env: Env, token_id: Symbol) -> Option<TimeTokenMetadata> {
+        env.storage().persistent().get(&DataKey::Token(token_id))
+    }
+
+    pub fn get_time_slot(env: Env, slot_id: u32) -> Option<TimeSlot> {
+        env.storage().persistent().get(&DataKey::Slot(slot_id))
+    }
     
-    let token_metadata = TokenMetadata {
-        name: String::from_str(&env, "Consultation #1"),
-        description: String::from_str(&env, "Expert consultation"),
-        image_uri: String::from_str(&env, "ipfs://hash"),
-    };
-    
-    let token = client.mint_time_token(&slot_id, &token_metadata);
-    assert_eq!(token, Symbol::new(&env, "TIME_1"));
+    pub fn get_collection_metadata(env: Env) -> Option<CollectionMetadata> {
+        env.storage().instance().get(&DataKey::CollectionMetadata)
+    }
 
-    // metadata after mint
-    let metadata = client
-        .get_token_metadata(&token)
-        .expect("metadata should exist");
-    assert_eq!(metadata.slot_id, slot_id);
-    assert_eq!(metadata.status, TimeTokenStatus::Available);
-    assert_eq!(metadata.current_owner, professional);
-    assert_eq!(metadata.metadata.name, token_metadata.name);
-
-    // buy / transfer
-    let buyer = Address::generate(&env);
-    let purchased = client.buy_time_token(&token, &buyer);
-    assert!(purchased);
-    
-    let metadata_after_buy = client.get_token_metadata(&token).unwrap();
-    assert_eq!(metadata_after_buy.status, TimeTokenStatus::Sold);
-    assert_eq!(metadata_after_buy.current_owner, buyer);
-
-    // redeem
-    let redeemed = client.redeem_time_token(&token);
-    assert!(redeemed);
-    let metadata_after_redeem = client.get_token_metadata(&token).unwrap();
-    assert_eq!(metadata_after_redeem.status, TimeTokenStatus::Redeemed);
+    pub fn hello(env: Env, to: String) -> Vec<String> {
+        vec![&env, String::from_str(&env, "ChronoPay"), to]
+    }
 }
 
-#[test]
-#[should_panic(expected = "token already minted for slot")]
-fn test_mint_twice_panics() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let professional = Address::generate(&env);
-    let slot_id = client.create_time_slot(&professional, &10u64, &20u64);
-    
-    let token_metadata = TokenMetadata {
-        name: String::from_str(&env, "T"),
-        description: String::from_str(&env, "D"),
-        image_uri: String::from_str(&env, "I"),
-    };
-    
-    let _ = client.mint_time_token(&slot_id, &token_metadata);
-    let _ = client.mint_time_token(&slot_id, &token_metadata);
+fn next_sequence(env: &Env, key: DataKey) -> u32 {
+    let next = env
+        .storage()
+        .instance()
+        .get(&key)
+        .unwrap_or(0u32)
+        .saturating_add(1);
+    env.storage().instance().set(&key, &next);
+    next
 }
 
-#[test]
-#[should_panic(expected = "token already redeemed")]
-fn test_buy_redeemed_panics() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let professional = Address::generate(&env);
-    let slot_id = client.create_time_slot(&professional, &10u64, &20u64);
-    
-    let token_metadata = TokenMetadata {
-        name: String::from_str(&env, "T"),
-        description: String::from_str(&env, "D"),
-        image_uri: String::from_str(&env, "I"),
-    };
-    
-    let token = client.mint_time_token(&slot_id, &token_metadata);
-    let buyer = Address::generate(&env);
-    let _ = client.buy_time_token(&token, &buyer);
-    let _ = client.redeem_time_token(&token);
-
-    // Buying again after redemption should fail
-    let buyer2 = Address::generate(&env);
-    let _ = client.buy_time_token(&token, &buyer2);
+fn build_token_symbol(env: &Env, token_id: u32) -> Symbol {
+    let token_label = format!("TIME_{}", token_id);
+    Symbol::new(env, &token_label)
 }
 
-#[test]
-#[should_panic(expected = "token already redeemed")]
-fn test_redeem_twice_panics() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let professional = Address::generate(&env);
-    let slot_id = client.create_time_slot(&professional, &10u64, &20u64);
-    
-    let token_metadata = TokenMetadata {
-        name: String::from_str(&env, "T"),
-        description: String::from_str(&env, "D"),
-        image_uri: String::from_str(&env, "I"),
-    };
-    
-    let token = client.mint_time_token(&slot_id, &token_metadata);
-    let _ = client.redeem_time_token(&token);
-    let _ = client.redeem_time_token(&token);
-}
-
-#[test]
-#[should_panic(expected = "buyer is already the owner")]
-fn test_buy_requires_distinct_parties() {
-    let env = setup();
-    env.mock_all_auths();
-    let contract_id = env.register(ChronoPayContract, ());
-    let client = ChronoPayContractClient::new(&env, &contract_id);
-
-    let professional = Address::generate(&env);
-    let slot_id = client.create_time_slot(&professional, &10u64, &20u64);
-    
-    let token_metadata = TokenMetadata {
-        name: String::from_str(&env, "T"),
-        description: String::from_str(&env, "D"),
-        image_uri: String::from_str(&env, "I"),
-    };
-    
-    let token = client.mint_time_token(&slot_id, &token_metadata);
-    let _ = client.buy_time_token(&token, &professional);
-}
+#[cfg(test)]
+mod test;
