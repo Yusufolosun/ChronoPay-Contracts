@@ -76,13 +76,6 @@ pub struct ChronoPayContract;
 #[contractimpl]
 impl ChronoPayContract {
     /// Initialize the contract with admin and collection metadata.
-    ///
-    /// # Arguments
-    /// * `admin` - The address with administrative privileges (e.g., for future upgrades or settings).
-    /// * `name` - The human-readable name of the time NFT collection.
-    /// * `symbol` - The abbreviated symbol for the collection.
-    ///
-    /// Fails if already initialized.
     pub fn initialize(env: Env, admin: Address, name: String, symbol: String) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
@@ -96,7 +89,6 @@ impl ChronoPayContract {
     }
 
     /// Create a time slot and persist it using persistent storage.
-    /// Fails if end_time is not after start_time.
     pub fn create_time_slot(
         env: Env,
         professional: Address,
@@ -128,7 +120,6 @@ impl ChronoPayContract {
     }
 
     /// Mint a time token for a slot with detailed metadata.
-    /// Fails if the slot does not exist or already has a minted token.
     pub fn mint_time_token(env: Env, slot_id: u32, metadata: TokenMetadata) -> Symbol {
         let mut slot: TimeSlot = env
             .storage()
@@ -174,7 +165,6 @@ impl ChronoPayContract {
     }
 
     /// Buy / transfer a time token from seller to buyer.
-    /// Fails if token is unknown, already redeemed, or buyer is already the owner.
     pub fn buy_time_token(env: Env, token_id: Symbol, buyer: Address) -> bool {
         buyer.require_auth();
 
@@ -214,7 +204,6 @@ impl ChronoPayContract {
     }
 
     /// Redeem a time token, marking it as consumed.
-    /// Fails if the token is unknown or already redeemed.
     pub fn redeem_time_token(env: Env, token_id: Symbol) -> bool {
         let mut metadata: TimeTokenMetadata = env
             .storage()
@@ -229,6 +218,7 @@ impl ChronoPayContract {
         }
 
         metadata.status = TimeTokenStatus::Redeemed;
+
         env.storage()
             .persistent()
             .set(&DataKey::Token(token_id.clone()), &metadata);
@@ -246,22 +236,18 @@ impl ChronoPayContract {
         true
     }
 
-    /// Fetch token metadata for audits, assertions, or UI display.
     pub fn get_token_metadata(env: Env, token_id: Symbol) -> Option<TimeTokenMetadata> {
         env.storage().persistent().get(&DataKey::Token(token_id))
     }
 
-    /// Fetch slot details including minted token (if any).
     pub fn get_time_slot(env: Env, slot_id: u32) -> Option<TimeSlot> {
         env.storage().persistent().get(&DataKey::Slot(slot_id))
     }
 
-    /// Fetch collection-level metadata.
     pub fn get_collection_metadata(env: Env) -> Option<CollectionMetadata> {
         env.storage().instance().get(&DataKey::CollectionMetadata)
     }
 
-    /// Hello-style entrypoint for CI and SDK sanity check.
     pub fn hello(env: Env, to: String) -> Vec<String> {
         vec![&env, String::from_str(&env, "ChronoPay"), to]
     }
@@ -283,4 +269,5 @@ fn build_token_symbol(env: &Env, token_id: u32) -> Symbol {
     Symbol::new(env, &token_label)
 }
 
+#[cfg(test)]
 mod test;
